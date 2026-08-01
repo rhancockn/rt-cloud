@@ -110,6 +110,28 @@ def runRpcTimeoutTest(dataInterface, testFileName, timeout=0):
     pass
 
 
+def test_scannerStreamSupportsWildcardPatterns():
+    dataInterface = DataInterface(dataRemote=False,
+                                  allowedDirs=allowedDirs,
+                                  allowedFileTypes=allowedFileTypes)
+
+    wildcardDir = os.path.join(tmpDir, 'wildcard-stream')
+    os.makedirs(wildcardDir, exist_ok=True)
+    sourceFile = os.path.join(sampleProjectDicomDir,
+                              '001_000013_000005.dcm')
+    targetFile = os.path.join(wildcardDir, 'scan01_005_extra.dcm')
+    shutil.copyfile(sourceFile, targetFile)
+
+    streamId = dataInterface.initScannerStream(wildcardDir,
+                                               'scan01_{TR:03d}_*.dcm',
+                                               300 * 1024,
+                                               anonymize=False)
+    streamedImage = dataInterface.getImageData(streamId, 5, timeout=2)
+    directImage = readDicomFromFile(targetFile)
+
+    assert streamedImage == directImage
+
+
 def runReadWriteFileTest(dataInterface, testFileName, isUsingProjectServer=False):
     with open(testFileName, 'rb') as fp:
         data = fp.read()

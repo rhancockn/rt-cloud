@@ -11,7 +11,7 @@ import time
 import pathlib
 import logging
 import threading
-from typing import Optional
+from typing import Callable, Optional
 from queue import Queue, Empty
 from watchdog.events import PatternMatchingEventHandler  # type: ignore
 from rtCommon.utils import DebugLevels, demoDelay
@@ -46,7 +46,8 @@ class FileWatcher():
         logging.log(logging.ERROR, "FileWatcher is abstract class. initFileNotifier not implemented")
         return None
 
-    def waitForFile(self, filename, timeout=0, timeCheckIncrement=1):
+    def waitForFile(self, filename, timeout=0, timeCheckIncrement=1,
+                    match_func: Optional[Callable[[str], bool]] = None):
         logging.log(logging.ERROR, "FileWatcher is abstract class. waitForFile not implemented")
         return ''
 
@@ -109,7 +110,8 @@ class WatchdogFileWatcher():
         self.observer.start()
 
 
-    def waitForFile(self, filename: str, timeout: int=0, timeCheckIncrement: int=1) -> Optional[str]:
+    def waitForFile(self, filename: str, timeout: int=0, timeCheckIncrement: int=1,
+                    match_func: Optional[Callable[[str], bool]] = None) -> Optional[str]:
         """
         Wait for a specific filename to be created in the directory specified in initFileNotifier.
 
@@ -129,7 +131,16 @@ class WatchdogFileWatcher():
         elif _filedir != self.watchDir:
             raise StateError(f"FileWatcher: file path doesn't match watch directory: {_filedir}, {self.watchDir}")
 
-        fileExists = os.path.exists(filename)
+        matchedPath = None
+        fileExists = False
+        if match_func is None:
+            fileExists = os.path.exists(filename)
+        else:
+            if self.watchDir is not None:
+                for item in os.listdir(self.watchDir):
+                    candidate = os.path.join(self.watchDir, item)
+                    if os.path.isfile(candidate) and match_func(candidate):
+                        return candidate
         if not fileExists:
             if self.observer is None:
                 raise FileNotFoundError("No fileNotifier and dicom file not found %s" % (filename))
@@ -163,8 +174,18 @@ class WatchdogFileWatcher():
             # We may have a stale event from a previous file if multiple events
             #   are created per file or if the previous file eventloop
             #   timed out and then the event arrived later.
-            if os.path.realpath(event.src_path) == os.path.realpath(filename):
+            if match_func is None:
+                if os.path.realpath(event.src_path) == os.path.realpath(filename):
+                    fileExists = True
+                    self.foundWithFileEvent = True
+                    eventTimeStamp = ts
+                    if event.event_type == 'created':
+                        # brief sleep after created event
+                        time.sleep(.05)
+                    continue
+            elif os.path.isfile(event.src_path) and match_func(event.src_path):
                 fileExists = True
+                matchedPath = event.src_path
                 self.foundWithFileEvent = True
                 eventTimeStamp = ts
                 if event.event_type == 'created':
@@ -191,6 +212,8 @@ class WatchdogFileWatcher():
                     self.foundWithFileEvent, filename, eventTimeStamp)
         if self.demoStep is not None and self.demoStep > 0:
             self.prevEventTime = demoDelay(self.demoStep, self.prevEventTime)
+        if matchedPath is not None:
+            return matchedPath
         return filename
 
 
@@ -284,7 +307,8 @@ class InotifyFileWatcher():
                 self.notifier.add_watch(os.path.realpath(self.watchDir), 
                                         mask=inotify.constants.IN_CLOSE_WRITE)
 
-    def waitForFile(self, filename: str, timeout: int=0, timeCheckIncrement: int=1) -> Optional[str]:
+    def waitForFile(self, filename: str, timeout: int=0, timeCheckIncrement: int=1,
+                    match_func: Optional[Callable[[str], bool]] = None) -> Optional[str]:
         """
         Wait for a specific filename to be created in the directory specified in initFileNotifier.
 
@@ -304,7 +328,16 @@ class InotifyFileWatcher():
         elif _filedir != self.watchDir:
             raise StateError(f"FileWatcher: file path doesn't match watch directory: {_filedir}, {self.watchDir}")
 
-        fileExists = os.path.exists(filename)
+        matchedPath = None
+        fileExists = False
+        if match_func is None:
+            fileExists = os.path.exists(filename)
+        else:
+            if self.watchDir is not None:
+                for item in os.listdir(self.watchDir):
+                    candidate = os.path.join(self.watchDir, item)
+                    if os.path.isfile(candidate) and match_func(candidate):
+                        return candidate
         if not fileExists:
             if (self.notifier is not None) and (self.notify_thread is None):
                 raise FileNotFoundError("FileNotifier thread not initialized and dicom file not found %s" % (filename))
@@ -338,8 +371,15 @@ class InotifyFileWatcher():
             # We may have a stale event from a previous file if multiple events
             #   are created per file or if the previous file eventloop
             #   timed out and then the event arrived later.
-            if os.path.realpath(eventfile) == os.path.realpath(filename):
+            if match_func is None:
+                if os.path.realpath(eventfile) == os.path.realpath(filename):
+                    fileExists = True
+                    self.foundWithFileEvent = True
+                    eventTimeStamp = ts
+                    continue
+            elif os.path.isfile(eventfile) and match_func(eventfile):
                 fileExists = True
+                matchedPath = eventfile
                 self.foundWithFileEvent = True
                 eventTimeStamp = ts
                 continue
@@ -363,6 +403,8 @@ class InotifyFileWatcher():
                     self.foundWithFileEvent, filename, eventTimeStamp)
         if self.demoStep is not None and self.demoStep > 0:
             self.prevEventTime = demoDelay(self.demoStep, self.prevEventTime)
+        if matchedPath is not None:
+            return matchedPath
         return filename
 
     def notifyEventLoop(self):

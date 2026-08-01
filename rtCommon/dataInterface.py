@@ -16,7 +16,7 @@ import glob
 import threading
 import logging
 from pathlib import Path
-from typing import List, Union
+from typing import Callable, List, Optional, Union
 import pydicom
 import rtCommon.utils as utils
 from rtCommon.remoteable import RemoteableExtensible
@@ -81,6 +81,27 @@ class DataInterface(RemoteableExtensible):
                 self.fileWatcher.__del__()
                 self.fileWatcher = None
 
+    def _buildFilenameMatcher(self, filePattern: str, imageIndex: int) -> Optional[Callable[[str], bool]]:
+        """Build a matcher for wildcard-style scanner filenames.
+
+        The stream pattern must still support f-string style {TR...} formatting.
+        After formatting with the requested image index, wildcard characters `*` and `?`
+        are converted into regex equivalents and the basename of each candidate file is
+        matched against the resulting expression.
+        """
+        formattedPattern = filePattern.format(TR=imageIndex)
+        if '*' not in formattedPattern and '?' not in formattedPattern:
+            return None
+
+        escapedPattern = re.escape(formattedPattern)
+        escapedPattern = escapedPattern.replace(r'\*', '.*').replace(r'\?', '.')
+        regex = re.compile(r'^' + escapedPattern + r'$')
+
+        def matchFilename(path: str) -> bool:
+            return bool(regex.match(os.path.basename(path)))
+
+        return matchFilename
+
     def initScannerStream(self, imgDir: str, filePattern: str, minFileSize: int,
                           anonymize: bool=True, demoStep: int=0) -> int:
         """
@@ -141,6 +162,7 @@ class DataInterface(RemoteableExtensible):
         if imageIndex is None:
             imageIndex = self.streamInfo.imgIndex
         filename = self.streamInfo.filePattern.format(TR=imageIndex)
+        filenameMatcher = self._buildFilenameMatcher(self.streamInfo.filePattern, imageIndex)
 
         if timeout <= 0:
             # Don't allow infinite timeout
@@ -153,7 +175,7 @@ class DataInterface(RemoteableExtensible):
             if time_remaining < loop_timeout:
                 loop_timeout = time_remaining
             try:
-                data = self.watchFile(filename, loop_timeout)
+                data = self.watchFile(filename, loop_timeout, filenameMatcher=filenameMatcher)
                 dicomImg = readDicomFromBuffer(data)
                 # Convert pixel data to a numpy.ndarray internally.
                 # Note: the conversion cause error in pickle encoding
@@ -244,7 +266,8 @@ class DataInterface(RemoteableExtensible):
             self.fileWatchLock.release()
         return
 
-    def watchFile(self, filename: str, timeout: int=5) -> bytes:
+    def watchFile(self, filename: str, timeout: int=5,
+                  filenameMatcher: Optional[Callable[[str], bool]] = None) -> bytes:
         """Watches for a specific file to be created and returns the file data.
 
         InitWatch() must be called first, before watching for specific files.
@@ -271,7 +294,12 @@ class DataInterface(RemoteableExtensible):
 
         self.fileWatchLock.acquire()
         try:
-            foundFilename = self.fileWatcher.waitForFile(filename, timeout=timeout, timeCheckIncrement=0.25)
+            foundFilename = self.fileWatcher.waitForFile(
+                filename,
+                timeout=timeout,
+                timeCheckIncrement=0.25,
+                match_func=filenameMatcher,
+            )
         finally:
             self.fileWatchLock.release()
         if foundFilename is None:
